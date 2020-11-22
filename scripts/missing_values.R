@@ -9,7 +9,7 @@ path_name <- file.path("Dropbox", "Articles", "HAZ_paper", "data")
 setwd(path_name)
 
 # compare gps observations quickly
-data <- read_dta("DHS_Data_CI_BF/BF_data_child/idhs_0009.dta")
+data <- read_dta("DHS_Data_CI_BF/BF_data_child/idhs_00011.dta")
 
 test <- data %>%
   select(starts_with("temp"), starts_with("precip")) %>%
