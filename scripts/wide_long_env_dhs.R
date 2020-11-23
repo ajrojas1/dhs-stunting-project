@@ -46,7 +46,7 @@ get_dhs_prenatal <- function(data, env_long) {
   # Required: data assumes format specified at beginning and long data above
   
   list_dfs <- list()
-  for(i in 1:nrow(data)) { #nrow(bf_data)
+  for(i in 1:nrow(bf_data)) { #nrow(bf_data)
     
     # prenatal is birthday minus duration of 9 mo.
     age_mon <- data[i, ]$kidagemo
@@ -77,12 +77,14 @@ write_csv(prenatal_precip, "prenatal_precip.csv")
 
 tempmax_stack <- get_dhs_prenatal(data_bf, tempmax_long)
 
+# tempmax prenatal values
 prenatal_tempmax <- tempmax_stack %>%
   group_by(ID, idhspid, dhsid) %>%
   summarise(
-    mean_pn = mean(precip),
+    mean_pn = mean(tempmax),
     num = n()
   )
+
 write_csv(prenatal_tempmax, "prenatal_tempmax.csv")
 
 
