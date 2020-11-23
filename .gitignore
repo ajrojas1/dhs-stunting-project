@@ -1,4 +1,4 @@
 .Rhistory
-.csv
+*.csv
 .DS_Store
 
