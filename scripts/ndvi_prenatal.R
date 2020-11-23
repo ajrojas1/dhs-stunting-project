@@ -41,17 +41,7 @@ mean_bf_ndvi <- get_ndvi_time("data/ndvi_avgs_87to11.csv") %>%
 # Method: take child birth month-year, add 1 month to it, then create 40 
 # week interval from that new value
 
-get_ndvi_pn <- function(start, end, dhsid, data) {
-  #####
-  # this function subsets prenatal values of longitudinal environmental
-  # data, like NDVI, temp, precip using dates using DHSID codes
-  # start = birth date - 9 months; end = birth date in DHS data
-  #####
-  data_subset <- data %>%
-    filter(date >= start & date <= end, DHSID == dhsid) 
-  return(data_subset)
-  
-}
+
 
 # test
 # end = bf_data$birthmo[1]

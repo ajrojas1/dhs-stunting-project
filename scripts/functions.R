@@ -69,8 +69,12 @@ get_ndvi_time <- function(file_name) {
 # function to get annual (12 month) averages of DHS context data
 annual_context_avg <- function(string, data) {
   
+  if(str_detect(string, "_") == FALSE){
+    stop("string must include '_' (e.g. 'precip_') to extract annual contextual means from DHS")
+  }
+  
   # Gets annual rowMeans for context data
-  # string_mon = precip_60, tempmin_59, etc. 
+  # string = precip_, tempmin_, etc. 
   annual_means <- data %>%
     select(idhspid, dhsid, intyear, monthint, intday, starts_with(string)) %>%
     unite(date, c("intyear", "monthint", "intday"), sep = "-") %>%
@@ -88,6 +92,49 @@ annual_context_avg <- function(string, data) {
   return(annual_means)
   
 }
+
+# convert DHS contextual data into long format if needed
+get_context_long <- function(data, string) {
+  
+  # get all precipitation data and pivot to long, <= survey date
+  dhs_context <- data %>%
+    zap_labels() %>% # this seems necessary for pivot_longer()
+    select(names(data)[1], idhspid, dhsid, year, starts_with(paste0(string, "_"))) %>%
+    pivot_longer(
+      cols = starts_with(paste0(string, "_")),
+      names_to = "time",
+      values_to = string,
+      values_drop_na = FALSE) %>%
+    separate(
+      col = "time",
+      into = c("type", "month"),
+      sep = "_"
+    ) 
+  return(dhs_context)
+}
+
+# function to extract prenatal months for NDVI
+get_ndvi_pn <- function(start, end, dhsid, data) {
+  #####
+  # this function subsets prenatal values of longitudinal environmental
+  # data, like AVHRR NDVI, using DHSID codes. Relies on Date objects.
+  # start = birth date - 9 months; end = birth date in DHS data
+  #####
+  data_subset <- data %>%
+    filter(date >= start & date <= end, DHSID == dhsid) 
+  return(data_subset)
+  
+}
+
+# use current temp/precip to capture some pre-natal values. May not work for all kids
+get_enviro_prenatal <- function(enviro_data, age_mon, id) {
+  
+  ## this function does same as get_ndvi_pn(), but uses month values from DHS
+  pre_natal <- enviro_data %>%
+    filter(ID == id, month > age_mon & month <= (age_mon + 9)) 
+  return(pre_natal)
+}
+
 
 # TODO: set up directory and files in a GitHub ready folder. 
 

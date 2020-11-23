@@ -29,54 +29,60 @@ data_bf <- read_dta(file_path) %>%
   zap_formats() %>%
   rowid_to_column("ID")
   
-
-# get all precipitation data and pivot to long, <= survey date
-precip_bf <- data_bf %>%
-  zap_labels() %>% # this seems necessary for pivot_longer()
-  select(ID, idhspid, dhsid, year, starts_with("precip_")) %>%
-  pivot_longer(
-    cols = starts_with("precip"),
-    names_to = "time",
-    values_to = "precip",
-    values_drop_na = FALSE) %>%
-  separate(
-    col = "time",
-    into = c("type", "month"),
-    sep = "_"
-  ) %>%
+# privot precipitation values to long format
+precip_long <- get_context_long(data_bf, "precip")%>%
   filter(!grepl("a", month)) %>%
   mutate(month = as.numeric(month)) # month has to be numeric for get_enviro_pn()
 
-# TODO: can do same wide to long procedure for tempmin and tempmax
+# pivot max temp to long format
+tempmax_long <- get_context_long(data_bf, "tempmax")%>%
+  filter(!grepl("a", month)) %>%
+  mutate(month = as.numeric(month)) # month has to be numeric for get_enviro_pn()
 
-# use current temp/precip to capture some pre-natal values. May not work for all kids
-get_enviro_pn <- function(enviro_data, age_mon, id) {
-  pre_natal <- enviro_data %>%
-    filter(ID == id, month > age_mon & month <= (age_mon + 9)) 
-  return(pre_natal)
+# function to get prenatal for each kid. 
+# TODO: maybe make this function more general for other uses. 
+get_dhs_prenatal <- function(data, env_long) { 
+  
+  # Required: data assumes format specified at beginning and long data above
+  
+  list_dfs <- list()
+  for(i in 1:nrow(data)) { #nrow(bf_data)
+    
+    # prenatal is birthday minus duration of 9 mo.
+    age_mon <- data[i, ]$kidagemo
+    id <- data[i, ]$ID 
+    # inputs: start = prenatal, end = birthday, dhsid = dhsid, data = mean_bf_ndvi 
+    list_dfs[[i]] <- get_enviro_prenatal(env_long, age_mon, id) 
+    print(i) # keep track of progress?
+  }
+  
+  # stack data: rows on rows
+  stack_df <- list_dfs %>%
+    do.call(rbind, .) %>%
+    as_tibble()
+  
+  return(stack_df)
 }
 
-# get prenatal for enviro data
-list_dfs <- list()
-for(i in 1:nrow(bf_data)) { #nrow(bf_data)
-  
-  # prenatal is birthday minus duration of 9 mo.
-  age_mon <- data_bf[i, ]$kidagemo
-  id <- data_bf[i, ]$ID 
-  
-  # inputs: start = prenatal, end = birthday, dhsid = dhsid, data = mean_bf_ndvi 
-  list_dfs[[i]] <- get_enviro_pn(precip_b4srvy, age_mon, id) 
-  print(i) # keep track of progress?
-}
+precip_stack <- get_dhs_prenatal(data_bf, precip_long)
 
-# stack data: rows on rows
-stack_df <- list_dfs %>%
-  do.call(rbind, .) %>%
-  as_tibble()
-
-prenatal_precip <- stack_df %>%
+# summarize data to create mean for prenatal
+prenatal_precip <- precip_stack %>%
   group_by(ID, idhspid, dhsid) %>%
   summarise(
     mean_pn = mean(precip),
     num = n()
   )
+write_csv(prenatal_precip, "prenatal_precip.csv")
+
+tempmax_stack <- get_dhs_prenatal(data_bf, tempmax_long)
+
+prenatal_tempmax <- tempmax_stack %>%
+  group_by(ID, idhspid, dhsid) %>%
+  summarise(
+    mean_pn = mean(precip),
+    num = n()
+  )
+write_csv(prenatal_tempmax, "prenatal_tempmax.csv")
+
+
