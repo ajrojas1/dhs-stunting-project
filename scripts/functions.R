@@ -40,7 +40,7 @@ stack_ndvi <- function(list_dfs) {
   return(stack_df)
 }  
 
-# select relevant AVHRR ndvi variables, lat/long just for geographical reference
+# select AVHRR ndvi year, month, day variables, lat/long just for geographical reference
 get_ndvi_time <- function(file_name) {
   
   x <- read_csv(file_name) %>% # note read_csv here, handle other file types? 
