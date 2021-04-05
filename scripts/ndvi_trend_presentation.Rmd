@@ -1,0 +1,231 @@
+---
+title: "NDVI Trend Analysis"
+author: "Alfredo Rojas"
+date: "3/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Read in data
+
+```{r read_data, message=F, warning=F, error=F, cache=T}
+
+library(timetk)
+library(tidyverse)
+################### Second attempt at lags using timetk ###########
+
+# AVHRR ndvi data
+ndvi <- read_csv("../data/BF_DHS_93to10_maxNDVI.csv") %>%
+  filter(avgmaxndvi != -1)
+summary(ndvi$avgmaxndvi)
+
+# CHIRPS
+climate <- read_csv("../data/CHIRPS/CHIRPS_DHS_1981_2010.csv")
+summary(climate$PRECIP)
+
+# remove NAs, format date
+climate <- climate %>%
+  filter(!is.na(PRECIP)) %>%
+  separate(col = DATE,
+           into = c("year", "month", "day"),
+           sep = "_"
+  ) %>%
+  group_by(DHSID, year, month) %>%
+  summarise(
+    avgprecip = mean(PRECIP)
+  )
+
+head(climate)
+
+```
+
+## Create lags 
+
+First, I create two lags on the precipitation varible and then sum the rows to create a 3-month accumulation of precipitation. This will be used to attach to NDVI values since literature supports 3-month accumulation is highly correlated with NDVI. We want the high correlation so we can capture any non-precip effects in residuals. 
+
+Then, the logic here is to create 60 lags representing 5 years of data leading up to the month in question. This is done for both 3-month accumulation and NDVI. This wide data set can be used to go row-by-row, reshape to long, and use long data format for regression. 
+
+```{r, cache=T}
+# this creates two month lags and then take mean for 3 months including current
+climate_lags <- climate %>%
+  arrange(DHSID, year, month) %>%
+  group_by(DHSID) %>%
+  tk_augment_lags(contains("precip"), .lags = 1:2)
+
+head(climate_lags)
+
+# NOTE: this lag contains the month on whcih observation lies
+climate_lags$sum3mo <- rowSums(climate_lags[ ,4:6]) # VERIFY <--- rowSums
+
+climate_lags <- climate_lags %>%
+  select(-contains("_lag"))
+
+head(climate_lags)
+
+# create ndvi lags -- 60 will be a 5-year trend --NOTE: lags lead up to
+# the month in question. . . 
+ndvi_lags <- ndvi %>%
+  arrange(DHSID, Year, Month) %>%
+  group_by(DHSID) %>%
+  tk_augment_lags(contains("ndvi"), .lags = 1:60) # change to 1:60
+
+head(ndvi_lags)
+
+# create climate lags of 3mo means. . . corresponds to ndvi lags
+# Thes lags lead up into the month in question
+# Interpretation is a little confusing becasue the first lag for rowSums
+# crate two NA values, so remember it still incudes all 12 months even if
+# it looks like it doesn't because of th NAs
+climate_lags2 <- climate_lags %>%
+  arrange(DHSID, year, month) %>%
+  group_by(DHSID) %>%
+  tk_augment_lags(contains("sum"), .lags = 1:60)
+
+head(climate_lags2)
+
+# remove values that have NA - dataset used for regressions
+ndvi <- ndvi_lags %>%
+  filter(Year > 1986) %>% # Will need to remove NAs from 5 year trends
+  select(-days_per_mo) 
+
+# left_join requires same type for columns
+ndvi$Month <- as.numeric(ndvi$Month)
+
+# dataset used for regressions
+climate <- climate_lags2 %>%
+  filter(year > 1986, year < 2011) 
+
+# left_join requires same type for columns
+climate$year <- as.numeric(climate$year)
+climate$month <- as.numeric(climate$month)
+
+# same no of obs
+nrow(ndvi) == nrow(climate)
+
+
+```
+## Reshape data for trend analysis
+
+I take the wide data set containing 60 month lags and create a "long" format so I can easily use it for simple linear regression. 
+
+```{r}
+
+ndvi_long <- ndvi[1, ] %>%
+    pivot_longer(cols = avgmaxndvi_lag1:avgmaxndvi_lag60,
+                 names_to = c(".value", "lag"), # .value is assigned to (.+g)
+                 names_pattern = "(.+g)(\\d{1,2})") 
+
+head(ndvi_long)
+  
+clim_long <- climate[1, ] %>%
+    pivot_longer(cols = sum3mo_lag1:sum3mo_lag60,
+                 names_to = c(".value", "lag"),
+                 names_pattern = "(.+g)(\\d{1,2})")
+
+head(clim_long)
+
+# join data.frames for regression
+ndvi_clim <- left_join(ndvi_long, clim_long, by = c("DHSID",
+                                                      "Year" = "year",
+                                                      "Month" = "month",
+                                                      "lag"))
+```
+
+## Visualize
+
+First plot is NDVI over time. Second plot is NDVI and 3-month accumulation to show how correlated it is. 
+
+```{r}
+
+plot1 <- ndvi_clim %>%
+  ggplot(aes(x=1:60, y = avgmaxndvi_lag)) +
+  geom_line() +
+  ggtitle("Observed NDVI, 1987 - 1992 in",
+          subtitle = "DHSID: BF199300000001")+
+  xlab("Time step: 1987 to 1992 (60 months)") +
+  ylab("avg max NDVI")
+
+plot1
+
+ndvi_clim %>%
+  ggplot(aes(x = avgmaxndvi_lag, y = sum3mo_lag)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  ggtitle("NDVI vs. 3mo Precip: 1987 - 1992",
+          subtitle = "DHSID: BF199300000001") +
+  xlab("Avg Max NDVI") +
+  ylab("Accumulated 3 mo Precip ") 
+
+cor.test(ndvi_clim$avgmaxndvi_lag, ndvi_clim$sum3mo_lag)
+
+```
+
+3 monthly accumulated precipitation and NDVI are highly correlated, but residuals will contain any non-rainfall effects. So, we need to extract residuals from simple linear regression where NDVI is dependent variable.
+
+```{r}
+reg <- lm(avgmaxndvi_lag ~ sum3mo_lag, data = ndvi_clim)
+
+ndvi_clim$fitted <- reg$fitted.values
+
+colors <- c("observed" = "black", "fitted" = "blue")
+# plot fitted vs. observed
+ndvi_clim %>%
+  ggplot() +
+  geom_line(aes(x = 1:60, y = avgmaxndvi_lag, 
+                color = "observed")) +
+  geom_line(aes(x = 1:60, y = fitted, color = "fitted"))+
+  labs(x = "Months 1 - 60", 
+       y = "Avg Max NDVI", 
+       color = "Legend") +
+  scale_color_manual(values = colors)
+
+reg %>%
+  ggplot(aes(x=1:60, y = reg$residuals)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 0) +
+  geom_smooth(method = "lm", se=F)+
+  xlab("Months 1 - 60") +
+  ylab("Residuals")
+  
+# regression 2
+time <- c(1:60)
+residuals <- reg$residuals
+res_mod <- lm(residuals ~ time)
+
+# slope and p-value
+summary(res_mod)$coefficients[2] # coefficient on time (slope)
+summary(res_mod)$coefficients[2,4] # p-value for time
+
+
+```
+
+## Output
+
+I looped through every row in `ndvi` and `climate` to run two regressions, NDVI vs. Precip and then Residuals vs. Time. This was a total of 396,288 * 2 = 792,576 regressions. I collected slope values and p-values. I can do a similar thing as we did with anomaly data and compare slope to sigma errors to create z-scores. 
+
+```{r}
+
+trends <- read_csv("../data/ndvi_trends.csv")
+head(trends)
+
+summary(trends$slopes)
+summary(trends$pvalues)
+
+sum(trends$pvalues <= 0.05)
+
+trends <- trends %>%
+  arrange(DHSID, Year, Month) %>%
+  group_by(DHSID) %>%
+  mutate(zscore = (slopes - mean(slopes))/sd(slopes))
+
+head(trends)
+```
+
+## Considerations
+
+Only 5 year trends. Slopes could vary depending on time interval. . . This might matter. Consider doing 10 year? Or 3 year? Where to draw this line? 
+
+This is at the cluster-level. Not at pixel level. 

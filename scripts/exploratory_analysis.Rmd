@@ -1,0 +1,680 @@
+---
+title: 'Preliminary Output: Burkina Faso'
+author: "Alfredo Rojas"
+date: "03/25/2021"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Reading in data and cleaning up
+
+I hid some of the code so that way the document was not too burdensome to read. I only included code for some crucial steps, like imputation, survey weighting, and regression. I will upload this .Rmd file to Shared Drive if you are interested in code. 
+```{r start, warning=FALSE, error=FALSE, message=FALSE, include=FALSE}
+
+library(tidyverse)
+library(haven)
+library(stargazer)
+library(ggplot2)
+library(lubridate)
+library(survey)
+library(jtools)
+library(huxtable)
+library(flextable)
+library(srvyr)
+library(car)
+
+# TODO: I need to combine ndvi and climate vars and and ndvi trends
+
+# Read in data and select variables of interest, create bday variable
+dhs <- read_dta("../data/idhs_00014.dta") %>%
+  rowid_to_column("rowid") %>%
+  select(rowid, dhsid, idhspid, idhspsu, idhsstrata, domain, year,
+         perweight, kidbirthyr, urban, wealthq, hhmemtotal, 
+         kidagemo, kidsex, kidbirthmo, kidbord, chebalive,
+         hwhazwho, educlvl, age, heightfem) %>%
+  mutate(missing = ifelse(hwhazwho > 9000, "MissingHAZ", "NotMissHAZ")) %>%
+  mutate(year_cat = as.factor(year)) %>%
+  mutate(birthday = as_date(paste(kidbirthyr, kidbirthmo, "15", sep = "-")))
+
+# create dates for children on which to attach enviro data
+dhs_bday <- dhs %>%
+  mutate(bfrbday = birthday,
+         yearafter = birthday + years(1),
+         twoyrsaftr = birthday + years(2))
+
+rm(dhs)
+
+# create prenatal dates, 1 year after, and two years after
+dhs_bf <- dhs_bday %>%
+  separate(bfrbday, into=c("yearbfr", "monthbfr", "daybfr"),
+           sep="-") %>%
+  separate(yearafter, into=c("year1aftr", "month1aftr", "day1aftr"),
+           sep="-") %>%
+  separate(twoyrsaftr, 
+           into=c("year2aftr", "month2aftr", "day2aftr"), 
+           sep="-") %>%
+  select(-c("daybfr", "day1aftr", "day2aftr"))
+
+# read in enviro data
+# TODO: Make sure burkina_chirps.csv is the up-to-date one w/ 95th percentile
+climate <- read_csv("../data/burkina_chirps.csv")
+ndvi <- read_csv("../data/ndvi_anom_BF.csv")
+ndvi_trends <- read_csv("../data/ndvi_trends.csv") %>%
+  select(-zscore)
+
+# create table if missing values
+table(dhs_bf$year, dhs_bf$missing)
+
+#drop missing values, and create a Stunted vs. not-stunted category
+dhs_small <- dhs_bf %>%
+  filter(hwhazwho < 9000) %>%
+  mutate(stunted = ifelse(hwhazwho <= -200, 1, 0), # 1 = stunted, 0 = not
+         kidsex = ifelse(kidsex == 1, "M", "F"),
+         heightfem = heightfem / 10,
+         hwhazwho = hwhazwho / 100,
+         kidagemo = na_if(kidagemo, 98)) 
+
+# create categorical variables
+vars <- c("urban", "kidsex", "wealthq", "educlvl", 
+          "stunted", "kidbirthmo")
+dhs_small[ ,vars] <- lapply(dhs_small[ ,vars], factor)
+
+# create numeric variables
+varsnum <- c("monthbfr", "yearbfr", "year1aftr", "month1aftr", "year2aftr", "month2aftr")
+dhs_small[ ,varsnum] <- lapply(dhs_small[ ,varsnum], as.numeric)
+
+table(dhs_small$year, dhs_small$stunted)
+```
+
+I created one month before bday variables (year and moth), one year after bday (year and month), and two years after bday (year and month). 
+
+```{r}
+dhs_small[24:30] %>%
+  mutate(yearbfr = as.character(yearbfr), 
+         year1aftr = as.character(year1aftr),
+         year2aftr = as.character(year2aftr)) %>%
+  head()
+```
+
+
+### Exploring variables and data, Not weighted
+
+I took your suggestion and imputed missing `heightfem` obs to the mean. Below, I describe one more issue with missing data. I am also open to other imputing methods if they are more suitable.
+
+```{r summary, warning=FALSE, error=FALSE, message=FALSE, include=F}
+
+# summary(dhs_small)
+hfmissing <- sum(dhs_small$heightfem >= 900)
+# Height of Moms => 103 obs missing
+print(paste("The number of obs missing from heightfem is:", hfmissing))
+
+# replacing heightfem missing values with NA, create new indicator var
+dhs_small <- dhs_small %>%
+  mutate(hfem_miss = ifelse(heightfem >= 900, 1, 0)) %>% # 1=missing, 0=not
+  mutate(hfem_miss = as.factor(hfem_miss)) %>%
+  mutate(heightfem = ifelse(heightfem >= 900, NA, heightfem))
+```
+
+### Impute heightfem to mean
+
+Here is where I impute `heightfem` to the mean.
+```{r}
+# impute NAs in heightfem to mean
+dhs_small$heightfem[is.na(dhs_small$heightfem)] <- mean(dhs_small$heightfem,
+                                                        na.rm = TRUE)
+
+print("heightfem summary statistics: ")
+summary(dhs_small$heightfem)
+
+```
+
+### Check for correlation among covariates
+
+```{r, include=F}
+
+cor.test(climate$ranom12mo, ndvi$nanom12mo)
+cor.test(climate$tanom12mo, ndvi$nanom12mo)
+
+# trend dataset is shorter than climate, need to combine temporarily 
+trend_climate_corr <- left_join(ndvi_trends, climate,
+                                by = c("Year" = "year",
+                                       "Month" = "month",
+                                       "DHSID" = "dhsid"))
+cor.test(trend_climate_corr$ranom12mo, trend_climate_corr$slopes)
+cor.test(trend_climate_corr$ranom12mo, trend_climate_corr$trndanom5yr)
+cor.test(trend_climate_corr$tanom12mo, trend_climate_corr$trndanom5yr)
+rm(trend_climate_corr)
+```
+
+
+
+### Merge climate variables and province
+
+I create one dataset containing all pre-natal, first-year, and second-year variables.
+
+After merging the environmental variables, I noticed that there are 288 rows that have NAs for the environmental variables. This must be a result from the NoData GPS points when doing the CHIRPS/CHIRTS analysis. I will drop these since the variables of interest are our environmental variables and it does not make sense to impute them.
+
+Also, I am dropping the `idhsstrata` column since that contains around 8,000 NAs and I don't want other observations to get accidentally dropped. I only rely on `perweight` and `dhsid` when doing the weighted regressions, so I think this is okay.
+
+Below, I merged on the different month and year variables to environmental year/month. 
+
+Lastly, I filter ages above 23 months since this will be our observations of interest. Stunting occurs above 23 months since kids are not born short, etc. This leaves us with around 12,600 obs. 
+
+```{r, warning=FALSE, error=FALSE, message=FALSE}
+
+# change type to join
+ndvi$month <- as.double(ndvi$month)
+
+# Merge climate variables for pre-natal, 1 year after, and 2 year after
+dhsclim <- left_join(dhs_small, climate, 
+                     by = c("dhsid" = "dhsid", 
+                            "yearbfr" = "year", 
+                            "monthbfr" = "month")) %>%
+  left_join(ndvi, 
+            by = c("dhsid" = "dhsid", 
+                   "yearbfr" = "year", 
+                   "monthbfr" = "month")) %>%
+  left_join(ndvi_trends, 
+            by = c("dhsid" = "DHSID", 
+                   "yearbfr" = "Year", 
+                   "monthbfr" = "Month")) %>%
+  rename(wetdayspn = wetdays12mo, drydayspn = drydays12mo,
+         rainpn = rain12mo, ranompn = ranom12mo, colddayspn = colddays12mo,
+         hotdayspn = hotdays12mo, temppn = temp12mo, tanompn = tanom12mo,
+         days_permo_pn = days_per_mo, ndvipn = ndvi12mo, nanompn = nanom12mo,
+         slopespn = slopes, pvaluespn = pvalues, trndanompn = trndanom5yr) %>%
+  left_join(climate,
+            by = c("dhsid" = "dhsid",
+                   "year1aftr" = "year",
+                   "month1aftr" = "month")) %>%
+  left_join(ndvi, 
+            by = c("dhsid" = "dhsid", 
+                   "year1aftr" = "year", 
+                   "month1aftr" = "month")) %>%
+  left_join(ndvi_trends, 
+            by = c("dhsid" = "DHSID", 
+                   "year1aftr" = "Year", 
+                   "month1aftr" = "Month")) %>%
+    rename(wetdays1y = wetdays12mo, drydays1y = drydays12mo,
+         rain1y = rain12mo, ranom1y = ranom12mo, colddays1y = colddays12mo,
+         hotdays1y = hotdays12mo, temp1y = temp12mo, tanom1y = tanom12mo,
+         days_permo_1y = days_per_mo, ndvi1y = ndvi12mo, nanom1y = nanom12mo,
+         slopes1y = slopes, pvalues1y = pvalues, trndanom1y = trndanom5yr) %>%
+  left_join(climate,
+            by = c("dhsid" = "dhsid",
+                   "year2aftr" = "year",
+                   "month2aftr" = "month")) %>%
+  left_join(ndvi, 
+            by = c("dhsid" = "dhsid", 
+                   "year2aftr" = "year", 
+                   "month2aftr" = "month")) %>%
+  left_join(ndvi_trends, 
+            by = c("dhsid" = "DHSID", 
+                   "year2aftr" = "Year",
+                   "month2aftr" = "Month")) %>%
+  rename(wetdays2y = wetdays12mo, drydays2y = drydays12mo,
+         rain2y = rain12mo, ranom2y = ranom12mo, colddays2y = colddays12mo,
+         hotdays2y = hotdays12mo, temp2y = temp12mo, tanom2y = tanom12mo,
+         days_permo_2y = days_per_mo, ndvi2y = ndvi12mo, nanom2y = nanom12mo,
+         slopes2y = slopes, pvalues2y = pvalues, trndanom2y = trndanom5yr) %>%
+  select(-c("year1aftr", "month1aftr", 
+            "year2aftr", "month2aftr", "idhsstrata")) %>%
+  filter(kidagemo > 23)
+
+num <- nrow(dhsclim)
+sprintf("Number of Obs for kids above 2 years old: %d", num)
+
+```
+
+### Look at summary stats to identify how many NAs
+
+```{r, include=FALSE}
+
+sprintf("Number of NAs across whole dataset: %d", sum(is.na(dhsclim)))
+sprintf("Number of NAs in specific env column due to missing GPS point: %d", 
+        sum(is.na(dhsclim$tanom1y)))
+print("Will drop NAs for main variables of interest")
+
+```
+
+### Attach provinces to each dataset 
+
+I attached provinces by DHSID, turned it into a indicator variable.
+
+```{r, include=F}
+# read in provinces
+provinces <- read.csv("../data/provinces_dhsids.csv") %>%
+  select(DHSID, ADMIN_NAME)
+
+# join provinces to data sets --> WHAT TO DO WITH MISSING??????? 03/21/20021
+dhsclim <- left_join(dhsclim, provinces, by = c("dhsid"="DHSID"))
+dhsclim <- dhsclim %>%
+  rename(provinces = ADMIN_NAME) %>%
+  mutate(provinces = replace_na(provinces, "Missing")) %>%
+  drop_na()
+
+# make provinces a factor
+dhsclim$provinces <- factor(dhsclim$provinces)
+dhsclim$dhsid <- factor(dhsclim$dhsid)
+
+
+summary(dhsclim$provinces)
+print("There are no NAs")
+
+```
+
+### Setting up survey weights and looking at summary statistics
+
+**QUESTION**: 
+
+* When applying survey weights, do I also need to apply the perweight to the environmental variables? R allows us to specify which variables to include in weighing procedure. 
+
+**ANSWER**
+
+* Yes, if analysis is at child-level, then perweights must be used for all variables. If, instead, we were doing the analysis at the cluster-level, then we would not have to use individual weights.
+
+``` {r, warning=FALSE, error=FALSE, message=FALSE}
+
+# Complex sample design parameters, apply weights for TOTAL data
+dhs_weights <- svydesign(id= ~dhsid,
+                         #strata= ~domain, 
+                         weights= ~perweight, 
+                         #variables = var_names_wts,
+                         data=dhsclim)
+
+#summary(dhs_weights)
+
+## FIGURE OUT WAY TO INCLUDE ALL?? BUT I LIKE THIS TBL_SVYSUMMARY THING
+library(gtsummary)
+
+# Create table of summary statistics for dep var and ind vars
+tbl_svysummary(dhs_weights, 
+               statistic = list(all_continuous() ~ "Avg: {mean} (SD={sd}) [Min: {min}, Max: {max}]"),
+               include = c("hwhazwho", "heightfem", "kidagemo", 
+                           "age", "urban", "kidsex", "wealthq",
+                           "kidbord", "educlvl", 
+                           "tanompn", "tanom1y", "tanom2y",
+                           "ranompn", "ranom1y", "ranom2y",
+                           "nanompn", "nanom1y", "nanom2y", 
+                           "trndanompn", "trndanom1y", "trndanom2y"))
+
+```
+
+# Regressions
+
+I create different models where dependent variable is HAZ for children over 23 months. First model is just demographic vars. Next model includes standardized temp variables (e.g., `tanompn`, `temp1y`, & `temp2y`). Third model adds standardized precipitation. Fourth adds standardized NDVI.
+
+Variables of Interest:
+
+* `tanompn` = Prenatal Temp Anomalies
+* `tanom1y` = Temp Anomalies for 1 year after birth
+* `tanom2y` = Temp Anomalies for 2 years after birth
+* `ranompn` = Prenatal Rain anomalies
+* `ranom1y` = Rain anomalies for 1 year after birth
+* `ranom2y` = Rain anomalies for 2 years after birth
+* `hotdayspn` = Pre-natal hotdays
+* `hotdays1y` = Hot days for first year 
+* `hotdays2y` = Hot days for second year
+* `coldays_` = cold days (same pattern as hotdays, pn, 1y, 2y)
+* `wetdays_` = wet days (same pattern as hot days, pn, 1y, 2y)
+* `drydays_` = dry days (same pattern as hot days, pn, 1y, 2y)
+* `nanompn` = Pre-natal NDVI anomalies
+* `nanom1y` = NDVI anomalies 1 year after bith
+* `nanom2y` = NDVI anomalies 2 years after birth
+* `trndanompn` = Pre-natal NDVI trend anomalies
+* `trndanom1y` = NDVI Trend anomalies for 1 year after birth
+* `trndanom2y` = NDVI trend anomalies for 2 years after birth
+* `I(x^2)` = will be any quadratic term
+
+
+Preliminary output below, but here is my overall takeaway from running some fixed effects OLS models. 
+
+Preliminary thoughts: I am a little cautious because the first 4 models are giving me results that seem a little weird, but maybe it's normal? According to OLS regression, it seems that Temp Anomalies increase HAZ but Rain Anomalies decrease HAZ. Perhaps we can go over the interpretation of these tables. Maybe there are other controls that are necessary? 
+
+I reviewed my data management steps. I am fairly certain the pre-natal, 1st year, and 2nd year values merged correctly. So I do not think it's a data management issue, but I will continue to review my work to make sure.
+
+
+### Regression with Fixed Effects for age above 23 months
+
+**NOTE** All fixed effects are suppressed in output 
+
+**NOTE2**: The `poly()` function creates orthogonal polynomials as opposed to just doing `I(ranompn^2)` which can create correlations, for example, among variables `ranompn` and `I(ranom^2)`. Using orthogonal polynomials can be a solution to this potential problem. See this StackOverflow [post](https://stackoverflow.com/questions/19484053/what-does-the-r-function-poly-really-do).
+
+**NOTE3**: I will avoid using the `poly()` function for now, and we can talk about the importance of orthogonal polynomials if necessary. 
+
+```{r, echo=F, warning=FALSE, error=FALSE, message=FALSE, results='asis'}
+
+# demographic vars only
+m1 <- svyglm(
+  hwhazwho ~
+    kidagemo+kidsex+I(kidagemo*kidagemo)+urban+
+    wealthq+kidbirthmo+kidbord+hfem_miss+
+    educlvl+heightfem+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+# add in temp for three periods
+m2 <- svyglm(
+  hwhazwho ~
+    tanompn + tanom1y + tanom2y + # temp anoms
+    I(kidagemo*kidagemo)+kidagemo+ # age and age^2
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+```
+
+
+### Joint Hypothesis Tests
+
+R has a function called `linearHypothesis()` that appears to be equivalent to Stata's `test` function. 
+
+This is the joint test for Model 2 (the first model with climate vars). Output will be printed below the regresssion table. 
+
+```{r}
+
+test1 <- linearHypothesis(m2, c("tanompn=0", "tanom1y=0", "tanom2y=0"))
+
+```
+
+### Continuing to build models
+
+Regressions and their corresponding joint tests. Below the regression table is a joint test for Model 3 (m3) and Model 4 (m4).
+
+```{r, results='asis'}
+# add in precipitation for all time periods
+m3 <- svyglm(
+  hwhazwho ~
+    tanompn + tanom1y + tanom2y + # temp anoms
+    ranompn + ranom1y + ranom2y + # precip anoms
+    I(kidagemo*kidagemo)+kidagemo+ # age and age^2
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test2 <- linearHypothesis(m3, c("tanompn=0", "tanom1y=0", "tanom2y=0",
+                       "ranompn=0", "ranom1y=0", "ranom2y=0"))
+
+# add in precip quadratic terms using poly()
+m4 <- svyglm(
+  hwhazwho ~
+    tanompn + tanom1y + tanom2y + # temp anoms
+    ranompn + ranom1y + ranom2y + # precip anoms
+    I(tanompn*tanompn) + I(tanom1y*tanom1y) + I(tanom2y*tanom2y) +
+    I(ranompn*ranompn) + I(ranom1y*ranom1y) + I(ranom2y*ranom2y) +
+    I(kidagemo*kidagemo)+kidagemo+ # age and age^2
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test3 <- linearHypothesis(m4, c("tanompn=0", "tanom1y=0", "tanom2y=0",
+                       "ranompn=0", "ranom1y=0", "ranom2y=0",
+                       "I(tanompn * tanompn)=0", "I(tanom1y * tanom1y)=0",
+                       "I(tanom2y * tanom2y)=0", "I(ranompn * ranompn)=0",
+                       "I(ranom1y * ranom1y)=0", "I(ranom2y * ranom2y)=0"))
+
+stargazer(m1, m2, m3, m4, title="Preliminary Analysis: Exposure across three time periods",
+          type='html')
+
+```
+
+
+#### Joint tests for m3 and m4, respectively
+
+```{r}
+
+print(test1)
+
+print(test2)
+
+print(test3)
+```
+
+
+## Some more models
+
+Look at temp + extreme precip days
+
+```{r, echo=F, warning=FALSE, error=FALSE, message=FALSE, results='asis'}
+
+# add extreme days
+m5 <-svyglm(
+  hwhazwho ~
+    hotdayspn + hotdays1y + hotdays2y +
+    colddayspn + colddays1y + colddays2y +
+    wetdayspn + wetdays1y + wetdays2y +
+    drydayspn + drydays1y + drydays2y +
+    I(kidagemo*kidagemo)+kidagemo+
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+## Looking at temperature extremes first
+test4 <- linearHypothesis(m5, c("hotdayspn=0", "hotdays1y=0", "hotdays2y=0",
+                       "colddayspn=0", "colddays1y=0", "colddays2y=0"))
+
+
+# Looking at precip extremes next
+test5 <- linearHypothesis(m5, c("wetdayspn=0", "wetdays1y=0", "wetdays2y=0",
+                       "drydayspn=0", "drydays1y=0", "drydays2y=0"))
+
+
+## Looking at all combined
+test6<-linearHypothesis(m5, c("hotdayspn=0", "hotdays1y=0", "hotdays2y=0",
+                       "colddayspn=0", "colddays1y=0", "colddays2y=0",
+                       "wetdayspn=0", "wetdays1y=0", "wetdays2y=0",
+                       "drydayspn=0", "drydays1y=0", "drydays2y=0"))
+
+
+stargazer(m5, title="Temp anoms + precip extreme days", 
+          type='html')
+
+
+```
+
+
+#### Joint tests for m5: temp extremes, rain extremes, and combined
+
+```{r}
+print(test4)
+
+print(test5)
+
+print(test6)
+```
+
+
+## NDVI anomalies
+
+```{r, echo=F, warning=FALSE, error=FALSE, message=FALSE, results='asis'}
+
+# add NDVI
+m6 <-svyglm(
+  hwhazwho ~
+    nanompn + nanom1y + nanom2y +
+    I(kidagemo*kidagemo)+kidagemo+
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test7<-linearHypothesis(m6, c("nanompn=0", "nanom1y=0", "nanom2y=0"))
+
+
+# add NDVI and quadratic ndvi
+m7 <-svyglm(
+  hwhazwho ~
+    nanompn + nanom1y + nanom2y +
+    I(nanompn*nanompn) + I(nanom1y*nanom1y) + I(nanom2y*nanom2y) +
+    I(kidagemo*kidagemo)+kidagemo+
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test8<-linearHypothesis(m7, 
+                        c("nanompn=0", "nanom1y=0", "nanom2y=0",
+                          "I(nanompn * nanompn)=0", 
+                          "I(nanom1y * nanom1y)=0",
+                          "I(nanom2y * nanom2y)=0"))
+
+
+stargazer(m6, m7, title="NDVI anomalies and NDVI quadratic terms", 
+          type='html')
+
+
+```
+
+
+#### Joint Test for m6 and m7
+
+```{r}
+print(test7)
+
+print(test8)
+```
+
+
+### NDVI Residual Trends
+
+```{r, echo=F, warning=FALSE, error=FALSE, message=FALSE, results='asis'}
+
+# add NDVI
+m8 <-svyglm(
+  hwhazwho ~
+    trndanompn + trndanom1y + trndanom2y +
+    I(kidagemo*kidagemo)+kidagemo+
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test9<-linearHypothesis(m8, c("trndanompn=0", "trndanom1y=0", "trndanom2y=0"))
+
+# add NDVI and quadratic ndvi
+m9 <-svyglm(
+  hwhazwho ~
+    trndanompn + trndanom1y + trndanom2y +
+    I(trndanompn*trndanompn) + I(trndanom1y*trndanom1y) + 
+    I(trndanom2y*trndanom2y) +
+    I(kidagemo*kidagemo)+kidagemo+
+    kidsex+urban+wealthq+
+    kidbirthmo+kidbord+educlvl+
+    heightfem+hfem_miss+provinces+
+    year_cat+kidbirthmo,
+  design=dhs_weights
+)
+
+test10<-linearHypothesis(m9, c("trndanompn=0", 
+                               "trndanom1y=0", "trndanom2y=0",
+                               "I(trndanompn * trndanompn)=0",
+                               "I(trndanom1y * trndanom1y)=0",
+                               "I(trndanom2y * trndanom2y)=0"))
+
+stargazer(m8, m9, title="NDVI trend anomalies with quadratic terms", 
+          type='html')
+
+```
+
+
+#### Joint tests for m8 and m9
+
+```{r}
+print(test9)
+
+print(test10)
+```
+
+
+### Visualizations
+
+**NOTE** I updated these visualizatiosn to reflect the Pre-Natal, 1st Year, and 2nd Year categories. So, maybe this gives us some insight into the relationships between HAZ and temp/rain. 
+
+```{r viz, echo=F, warning=FALSE, error=FALSE, message=FALSE}
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = tanompn)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Temp 12 mo avgs: One Year Before Birth")+
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Pre-natal Temp Anomalies (12 mo) by Survey Year")
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = tanom1y)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Temp 12 mo avgs: First Year after Birth")+
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Post-natal Temp Anomalies (12 mo) by Survey Year")
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = tanom2y)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Temp 12 mo avgs: Second Year after Birth")+
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Post-natal Temp Anomalies (12 mo) by Survey Year")
+
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = ranompn)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Rain 12 mo avggs: One Year Before Birth") +
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Pre-Natal Rain Anomalies (12 mo) by Survey Year")
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = ranom1y)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Rain 12 mo avggs: One Year After Birth") +
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Post-Natal Rain Anomalies (12 mo) by Survey Year")
+
+dhsclim %>%
+  ggplot(aes(x = hwhazwho, y = ranom2y)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "loess") +
+  xlab("HAZ") +
+  ylab("Rain 12 mo avggs: Second Year After Birth") +
+  facet_wrap(. ~ year) +
+  ggtitle("HAZ vs. Post-natal Rain Anomalies (12 mo) by Survey Year")
+
+
+
+```
+
+
+
+
+
