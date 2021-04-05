@@ -6,32 +6,58 @@
 library(tidyverse)
 library(haven)
 library(stargazer)
+library(R.utils)
 # library(MASS)
 
-# temperature max
-tempmax <- read_csv("data/prenatal_tempmax.csv") %>%
-  rename(tempmax_pnavg = mean_pn) %>%
-  select(ID, tempmax_pnavg)
+gunzip("data/idhs_00014.dta.gz", remove=FALSE)
 
-# precipitation data
-precip <- read_csv("data/prenatal_precip.csv") %>%
-  rename(precip_pnavg = mean_pn) %>%
-  select(ID, precip_pnavg)
+# get preliminary predictors of interest
+dhs_bf <- read_dta("data/idhs_00014.dta") %>%
+  rowid_to_column("rowid") %>%
+  select(rowid, dhsid, idhspid, year, urban, wealthq, hhmemtotal, 
+         kidcurage, kidsex, kidbirthmo, kidbord, chebalive,
+         hwhazwho, educlvl, heightfem) %>%
+  mutate(missing = ifelse(hwhazwho > 9000, 0, 1))
 
-# NDVI data
-ndvi <- read_csv("data/prenatal_ndvi_93to10.csv") %>%
+# create tabke if missing values
+table(dhs_bf$year, dhs_bf$missing)
+
+## TODO: drop missing values, and create a Stunted vs. not-stunted category
+
+dhs_bf_cat <- dhs_bf %>%
+  filter(hwhazwho < 9000) %>%
+  mutate(isStunted = ifelse(hwhazwho <= -200, "stunted", "not_stunted"))
+
+dhs_bf_cat$isStunted <- as.factor(dhs_bf_cat$isStunted)
+
+table(dhs_bf_cat$year, dhs_bf_cat$isStunted)
+
+dhsid_93 <- dhs_bf %>%
+  select(dhsid)
+
+dhsid_93 <- unique(dhsid_93$dhsid)
+
+chirps <- read_csv("data/CHIRPS/CHIRPS_DHS_1981_2010.csv") %>%
+  filter(DHSYEAR == 1993) %>%
+  select(PRECIP, DATE, DHSID)
+
+chirts <- read_csv("data/CHIRTS/CHIRTS_DHS_1981_2010.csv") %>%
+  filter(DHSYEAR == 1993) %>%
+  select(PRECIP, DATE, DHSID)
+
+ndvi <- read_csv("data/dhs1993_ndvi_stats/1993_decadal_ndvi.csv")
+
+test <- ndvi %>%
+  filter(DHSID == dhsid_93[1]) %>%
+  mutate(zscore = (ndvi - mean(ndvi))/sd(ndvi))
+
+# NDVI prenatal data
+ndvi_pn <- read_csv("data/prenatal_ndvi_93to10_v2.csv") %>%
   rename(ndvi_pnavg = mean_pn) %>%
   select(rowid, ndvi_pnavg)
 
-# get preliminary predictors of interest
-data_bf <- read_dta("data/idhs_00013.dta") %>%
-  rowid_to_column("rowid") %>%
-  select(rowid, dhsid, idhspid, year, urban, wealthq, hhmemtotal, kidbord,
-         hwhazwho, ecoregion, electrc, educlvl, heightfem) %>%
-  filter(hwhazwho < 9000)
-
 # merge and handle missing
-data_ready <- data_bf %>%
+data_ready <- dhs_bf %>%
   left_join(precip, by = c("rowid" = "ID")) %>%
   left_join(tempmax, by = c("rowid" = "ID")) %>%
   left_join(ndvi, by = "rowid") %>%
@@ -72,7 +98,7 @@ ggplot(data_viz,
              mapping = aes(xintercept = hh.med, color = urban),
              show.legend = F, linetype = "dashed")
 
-library(gtsummary)
+# library(gtsummary)
 data_ready %>%
   zap_label() %>%
   zap_labels() %>%

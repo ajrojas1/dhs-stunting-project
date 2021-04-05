@@ -1,3 +1,6 @@
+*
+*/
 *.csv
 *.dta
 .DS_Store
+!.gitignore

@@ -1,4 +1,9 @@
+*.RData
 .Rhistory
+*.R
+*.html
+*.dta
 *.csv
+*.Rmd
 .DS_Store
 
