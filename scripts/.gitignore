@@ -1,3 +1,7 @@
 *.do
-*/
 *.txt
+*.html
+*.tiff
+*.doc
+*.docx
+html_output/
